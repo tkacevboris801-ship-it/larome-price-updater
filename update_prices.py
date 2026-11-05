@@ -2146,47 +2146,39 @@ def set_low_process_priority():
 
 def parse_playwright_proxy(raw_proxy: str | None) -> dict | None:
     """
-    Преобразует строку прокси любого популярного формата в словарь настроек Playwright:
-    Поддерживает форматы:
-      - ip:port:login:password (стандарт выдачи Proxy6 / Proxy.Market / Proxyline)
-      - login:password@ip:port
-      - http://login:password@ip:port
-      - socks5://login:password@ip:port
-      - ip:port
-    Автоматически пускает Randewoo и Supabase напрямую (bypass), экономя трафик и ускоряя работу!
+    Извлекает чистый IP:PORT и логин/пароль регулярным выражением (даже если в GitHub Secrets
+    случайно попали квадратные скобки Markdown [http://...](...) или кавычки).
     """
     if not raw_proxy:
         return None
-    s = raw_proxy.strip().strip('"').strip("'")
+    s = str(raw_proxy).strip()
     if not s:
         return None
 
-    scheme = "http"
-    if "://" in s:
-        scheme, s = s.split("://", 1)
-        scheme = scheme.lower().strip()
-    # ВАЖНО: браузер Chromium не поддерживает авторизацию по логину/паролю через протокол socks5://,
-    # поэтому для прокси с логином и паролем всегда используем http://
-    if scheme.startswith("socks") and ("@" in s or s.count(":") == 3):
-        scheme = "http"
-
     username = None
     password = None
-    host_port = s
+    host_port = None
 
-    if "@" in s:
-        auth_part, host_port = s.rsplit("@", 1)
-        if ":" in auth_part:
-            username, password = auth_part.split(":", 1)
+    # Вариант 1: user:pass@ip:port
+    m_auth = re.search(r"([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)@(\d{1,3}(?:\.\d{1,3}){3}:\d{2,5})", s)
+    if m_auth:
+        username, password, host_port = m_auth.group(1), m_auth.group(2), m_auth.group(3)
     else:
-        parts = s.split(":")
-        if len(parts) == 4:
-            host_port = f"{parts[0]}:{parts[1]}"
-            username = parts[2]
-            password = parts[3]
+        # Вариант 2: ip:port:user:pass
+        m_colon = re.search(r"(\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}):([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)", s)
+        if m_colon:
+            host_port, username, password = m_colon.group(1), m_colon.group(2), m_colon.group(3)
+        else:
+            # Вариант 3: просто ip:port
+            m_ip = re.search(r"(\d{1,3}(?:\.\d{1,3}){3}:\d{2,5})", s)
+            if m_ip:
+                host_port = m_ip.group(1)
+
+    if not host_port:
+        return None
 
     cfg = {
-        "server": f"{scheme}://{host_port}",
+        "server": f"http://{host_port}",
         "bypass": "randewoo.ru,*.randewoo.ru,*.supabase.co",
     }
     if username and password:
