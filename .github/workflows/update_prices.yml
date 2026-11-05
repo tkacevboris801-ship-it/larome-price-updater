@@ -1,5 +1,3 @@
-update_prices.yml
-100 %
 name: Auto Update Perfume Prices (10 Parallel Shards)
 
 on:
@@ -44,4 +42,3 @@ jobs:
           BATCH=${{ github.event.inputs.batch_size || 700 }}
           OFFSET=$(( ${{ matrix.shard }} * BATCH ))
           xvfb-run --auto-servernum --server-args="-screen 0 1366x900x24" python update_prices.py --offset $OFFSET --batch $BATCH --workers 3
-update_prices.yml. На экране.
