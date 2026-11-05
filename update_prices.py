@@ -111,7 +111,7 @@ def _clean_env_key(raw_val: str | None) -> str:
 SUPABASE_URL = _clean_env_url(os.environ.get("SUPABASE_URL"))
 SUPABASE_KEY = _clean_env_key(os.environ.get("SUPABASE_KEY"))
 
-options = ClientOptions(postgrest_client_timeout=30)
+options = ClientOptions(postgrest_client_timeout=45)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY, options=options)
 
 CONCURRENT_WORKERS = 3
@@ -1809,7 +1809,7 @@ def cleanup_duplicate_perfumes_in_db():
     print("🧹 Проверка базы на дубликаты карточек ароматов...")
     all_rows = []
     offset = 0
-    step = 1000
+    step = 500
     while True:
         res = safe_db(
             supabase.table("perfumes")
@@ -1894,20 +1894,11 @@ def cleanup_duplicate_perfumes_in_db():
 
 
 def cleanup_corrupted_db_data():
-    print("🧹 Быстрая очистка БД от старых склеенных цен (>150 000₽), подводок для глаз и атомайзеров...")
-    safe_db(supabase.table("perfume_prices").delete().gt("price", 150000))
-    for bad_slug in ["podvodka", "dlya-glaz", "eyeliner", "mascara", "tush", "pomada", "blesk"]:
-        safe_db(supabase.table("perfume_prices").delete().ilike("store_url", f"%{bad_slug}%"))
-    for bad_title in ["Атомайзер%", "Кейс для пробников%", "Набор #%"]:
-        safe_db(supabase.table("perfumes").delete().ilike("title", bad_title))
-
-    # Синхронизируем поле price в таблице perfumes с реальным наличием в perfume_prices:
-    # если у парфюма в perfume_prices 0 предложений (все магазины «нет в наличии»), обнуляем perfumes.price = 0,
-    # чтобы на плитке каталога никогда не висела старая цена (например «от 3 042 ₽» при пустой карточке)!
     print("🔄 Сверка цен на плитках каталога (perfumes.price) с реальным наличием в магазинах (perfume_prices)...")
     active_min_by_pid: dict[str, int] = {}
-    step = 1000
+    step = 500
     p_off = 0
+    prices_loaded_ok = True
     while True:
         pres = safe_db(
             supabase.table("perfume_prices")
@@ -1916,12 +1907,24 @@ def cleanup_corrupted_db_data():
             .gt("price", 0)
             .range(p_off, p_off + step - 1)
         )
-        pbatch = (pres.data if pres and hasattr(pres, "data") else []) or []
+        if pres is None:
+            prices_loaded_ok = False
+            break
+        pbatch = (pres.data if hasattr(pres, "data") else []) or []
         for pr in pbatch:
             pid_str = str(pr.get("perfume_id") or "")
             price_val = int(pr.get("price") or 0)
-            if not pid_str or price_val <= 0:
+            vol_str = str(pr.get("volume") or "").strip()
+            if not pid_str or price_val < 1000 or price_val > 180000:
                 continue
+            # Не берём микро-отливанты (< 10 мл) как главную цену карточки
+            m_vol = re.match(r"^(\d+(?:[.,]\d+)?)", vol_str)
+            if m_vol:
+                try:
+                    if float(m_vol.group(1).replace(",", ".")) < 10:
+                        continue
+                except Exception:
+                    pass
             prev = active_min_by_pid.get(pid_str)
             if prev is None or price_val < prev:
                 active_min_by_pid[pid_str] = price_val
@@ -1929,8 +1932,12 @@ def cleanup_corrupted_db_data():
             break
         p_off += step
 
-    fixed_zero_cnt = 0
-    fixed_min_cnt = 0
+    if not prices_loaded_ok or not active_min_by_pid:
+        print("⚠️ Пропуск сквозной сверки цен (таблица perfume_prices недоступна или таймаут сети).\n")
+        return
+
+    zero_ids = []
+    min_updates: list[tuple[int, int]] = []
     perf_off = 0
     while True:
         res = safe_db(
@@ -1939,22 +1946,31 @@ def cleanup_corrupted_db_data():
             .order("id")
             .range(perf_off, perf_off + step - 1)
         )
-        batch = (res.data if res and hasattr(res, "data") else []) or []
+        if res is None:
+            break
+        batch = (res.data if hasattr(res, "data") else []) or []
         for row in batch:
             pid_str = str(row.get("id") or "")
             cur_price = int(row.get("price") or 0)
             real_min = active_min_by_pid.get(pid_str, 0)
             if cur_price != real_min:
-                safe_db(supabase.table("perfumes").update({"price": real_min}).eq("id", row["id"]))
                 if real_min == 0:
-                    fixed_zero_cnt += 1
+                    zero_ids.append(row["id"])
                 else:
-                    fixed_min_cnt += 1
+                    min_updates.append((row["id"], real_min))
         if len(batch) < step:
             break
         perf_off += step
 
-    print(f"✨ База синхронизирована: обнулено «Нет в наличии» у {fixed_zero_cnt} духов, выровнена минимальная цена у {fixed_min_cnt} духов!\n")
+    # Пакетное обнуление пачками по 150 ID за 1 запрос (в 150 раз быстрее поштучного обновления!)
+    for i in range(0, len(zero_ids), 150):
+        chunk = zero_ids[i : i + 150]
+        safe_db(supabase.table("perfumes").update({"price": 0}).in_("id", chunk))
+
+    for row_id, real_min in min_updates:
+        safe_db(supabase.table("perfumes").update({"price": real_min}).eq("id", row_id))
+
+    print(f"✨ База синхронизирована: обнулено «Нет в наличии» у {len(zero_ids)} духов, выровнена минимальная цена у {len(min_updates)} духов!\n")
 
 
 # =====================================================================
@@ -2295,7 +2311,7 @@ def parse_playwright_proxy(raw_proxy: str | None) -> dict | None:
 def fetch_all_perfumes_from_db(start_offset: int = 0, max_batch: int = 0) -> list[dict]:
     perfumes = []
     offset = start_offset
-    step = 1000
+    step = 500
     while True:
         res = safe_db(
             supabase.table("perfumes")
