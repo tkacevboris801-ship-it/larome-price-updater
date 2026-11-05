@@ -1,4 +1,6 @@
-name: Auto Update Perfume Prices (5 Parallel Shards)
+update_prices.yml
+100 %
+name: Auto Update Perfume Prices (10 Parallel Shards)
 
 on:
   schedule:
@@ -6,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       batch_size:
-        description: 'Perfumes per shard (5 x 2000 = 10000)'
+        description: 'Perfumes per shard (10 x 700 = 7000)'
         required: false
-        default: '2000'
+        default: '700'
 
 jobs:
   update-prices-shard:
@@ -17,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
     steps:
       - name: Checkout repository
@@ -39,6 +41,7 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           RU_PROXY: ${{ secrets.RU_PROXY }}
         run: |
-          BATCH=${{ github.event.inputs.batch_size || 2000 }}
+          BATCH=${{ github.event.inputs.batch_size || 700 }}
           OFFSET=$(( ${{ matrix.shard }} * BATCH ))
-          xvfb-run --auto-servernum --server-args="-screen 0 1366x900x24" python update_prices.py --offset $OFFSET --batch $BATCH --workers 2
+          xvfb-run --auto-servernum --server-args="-screen 0 1366x900x24" python update_prices.py --offset $OFFSET --batch $BATCH --workers 3
+update_prices.yml. На экране.
