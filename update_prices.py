@@ -120,6 +120,26 @@ STATUS_FOUND = "FOUND"
 STATUS_NOT_FOUND = "NOT_FOUND"
 STATUS_BLOCKED = "BLOCKED"
 
+# Умная защита от потери времени на облачных серверах:
+# Если магазин выдал 6 подряд блокировок антибота (STATUS_BLOCKED), ставим его на паузу на 20 минут,
+# чтобы поток не тратил по 25 секунд впустую на каждом парфюме и успевал пройти всю базу за 1–1.5 часа!
+STORE_BLOCK_STREAK: dict[str, int] = {"randewoo": 0, "goldapple": 0, "rivegauche": 0, "letoile": 0}
+STORE_COOLDOWN_UNTIL: dict[str, float] = {"randewoo": 0.0, "goldapple": 0.0, "rivegauche": 0.0, "letoile": 0.0}
+
+
+def is_store_on_cooldown(store_code: str) -> bool:
+    return time.time() < STORE_COOLDOWN_UNTIL.get(store_code, 0.0)
+
+
+def record_store_status(store_code: str, status: str):
+    if status == STATUS_BLOCKED:
+        STORE_BLOCK_STREAK[store_code] = STORE_BLOCK_STREAK.get(store_code, 0) + 1
+        if STORE_BLOCK_STREAK[store_code] >= 6:
+            STORE_COOLDOWN_UNTIL[store_code] = time.time() + 1200.0
+    elif status in (STATUS_FOUND, STATUS_NOT_FOUND):
+        STORE_BLOCK_STREAK[store_code] = 0
+        STORE_COOLDOWN_UNTIL[store_code] = 0.0
+
 STOP_WORDS = [
     "подводка", "podvodka", "eyeliner", "тушь", "tush", "mascara",
     "помада", "pomada", "блеск для губ", "карандаш", "karandash",
@@ -1959,13 +1979,17 @@ async def worker(worker_id: int, queue: asyncio.Queue, context, total_count: int
         all_scraped_reviews = []
 
         # 1. Randewoo
-        r_status, r_offers, r_pyramid, r_reviews = await parse_randewoo(
-            page, brand, title, encoded_plus, known_urls.get("Randewoo"), target_conc=target_conc
-        )
-        if r_status != STATUS_FOUND and known_urls.get("Randewoo"):
+        if is_store_on_cooldown("randewoo"):
+            r_status, r_offers, r_pyramid, r_reviews = STATUS_BLOCKED, [], None, []
+        else:
             r_status, r_offers, r_pyramid, r_reviews = await parse_randewoo(
-                page, brand, title, encoded_plus, None, target_conc=target_conc
+                page, brand, title, encoded_plus, known_urls.get("Randewoo"), target_conc=target_conc
             )
+            if r_status == STATUS_NOT_FOUND and known_urls.get("Randewoo"):
+                r_status, r_offers, r_pyramid, r_reviews = await parse_randewoo(
+                    page, brand, title, encoded_plus, None, target_conc=target_conc
+                )
+            record_store_status("randewoo", r_status)
 
         if r_status == STATUS_FOUND:
             found_offers.extend(r_offers)
@@ -1989,13 +2013,17 @@ async def worker(worker_id: int, queue: asyncio.Queue, context, total_count: int
             "search_url": f"https://rivegauche.ru/search?text={encoded_plus}",
             "card_sel": 'product-item, [class*="product-card"], [class*="product-item"], article',
         }
-        rg_status, rg_offers, rg_pyramid, rg_reviews = await parse_rivegauche_or_letu_v21(
-            page, rg_store, brand, title, known_urls.get("Рив Гош"), target_conc=target_conc
-        )
-        if rg_status != STATUS_FOUND and known_urls.get("Рив Гош"):
+        if is_store_on_cooldown("rivegauche"):
+            rg_status, rg_offers, rg_pyramid, rg_reviews = STATUS_BLOCKED, [], None, []
+        else:
             rg_status, rg_offers, rg_pyramid, rg_reviews = await parse_rivegauche_or_letu_v21(
-                page, rg_store, brand, title, None, target_conc=target_conc
+                page, rg_store, brand, title, known_urls.get("Рив Гош"), target_conc=target_conc
             )
+            if rg_status == STATUS_NOT_FOUND and known_urls.get("Рив Гош"):
+                rg_status, rg_offers, rg_pyramid, rg_reviews = await parse_rivegauche_or_letu_v21(
+                    page, rg_store, brand, title, None, target_conc=target_conc
+                )
+            record_store_status("rivegauche", rg_status)
 
         if rg_status == STATUS_FOUND:
             found_offers.extend(rg_offers)
@@ -2013,13 +2041,17 @@ async def worker(worker_id: int, queue: asyncio.Queue, context, total_count: int
             await asyncio.sleep(0.4)
 
         # 3. Золотое Яблоко
-        ga_status, ga_offers, ga_pyramid, ga_reviews = await parse_goldapple_v28(
-            page, brand, title, encoded_pct, known_urls.get("Золотое Яблоко"), target_conc=target_conc
-        )
-        if ga_status != STATUS_FOUND and known_urls.get("Золотое Яблоко"):
+        if is_store_on_cooldown("goldapple"):
+            ga_status, ga_offers, ga_pyramid, ga_reviews = STATUS_BLOCKED, [], None, []
+        else:
             ga_status, ga_offers, ga_pyramid, ga_reviews = await parse_goldapple_v28(
-                page, brand, title, encoded_pct, None, target_conc=target_conc
+                page, brand, title, encoded_pct, known_urls.get("Золотое Яблоко"), target_conc=target_conc
             )
+            if ga_status == STATUS_NOT_FOUND and known_urls.get("Золотое Яблоко"):
+                ga_status, ga_offers, ga_pyramid, ga_reviews = await parse_goldapple_v28(
+                    page, brand, title, encoded_pct, None, target_conc=target_conc
+                )
+            record_store_status("goldapple", ga_status)
 
         if ga_status == STATUS_FOUND:
             found_offers.extend(ga_offers)
@@ -2043,13 +2075,17 @@ async def worker(worker_id: int, queue: asyncio.Queue, context, total_count: int
             "search_url": f"https://www.letu.ru/search?Dy=1&Ntt={encoded_pct}",
             "card_sel": '[data-at-product-tile], [class*="product-tile"], [class*="product-card"], article',
         }
-        l_status, l_offers, l_pyramid, l_reviews = await parse_rivegauche_or_letu_v21(
-            page, letu_store, brand, title, known_urls.get("Л'Этуаль"), target_conc=target_conc
-        )
-        if l_status != STATUS_FOUND and known_urls.get("Л'Этуаль"):
+        if is_store_on_cooldown("letoile"):
+            l_status, l_offers, l_pyramid, l_reviews = STATUS_BLOCKED, [], None, []
+        else:
             l_status, l_offers, l_pyramid, l_reviews = await parse_rivegauche_or_letu_v21(
-                page, letu_store, brand, title, None, target_conc=target_conc
+                page, letu_store, brand, title, known_urls.get("Л'Этуаль"), target_conc=target_conc
             )
+            if l_status == STATUS_NOT_FOUND and known_urls.get("Л'Этуаль"):
+                l_status, l_offers, l_pyramid, l_reviews = await parse_rivegauche_or_letu_v21(
+                    page, letu_store, brand, title, None, target_conc=target_conc
+                )
+            record_store_status("letoile", l_status)
 
         if l_status == STATUS_FOUND:
             found_offers.extend(l_offers)
