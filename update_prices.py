@@ -215,6 +215,9 @@ def safe_db(query_builder, retries=4):
         except Exception as e:
             last_err = e
             err_str = str(e).lower()
+            # Если карточка парфюма была удалена как дубликат (код 23503 foreign key), не делаем повторных попыток
+            if "23503" in err_str or "foreign key constraint" in err_str:
+                return None
             if any(w in err_str for w in ("timed out", "timeout", "disconnected", "connection", "protocol", "reset", "broken", "eof")):
                 try:
                     supabase = create_client(SUPABASE_URL, SUPABASE_KEY, options=ClientOptions(postgrest_client_timeout=20))
@@ -1897,7 +1900,61 @@ def cleanup_corrupted_db_data():
         safe_db(supabase.table("perfume_prices").delete().ilike("store_url", f"%{bad_slug}%"))
     for bad_title in ["Атомайзер%", "Кейс для пробников%", "Набор #%"]:
         safe_db(supabase.table("perfumes").delete().ilike("title", bad_title))
-    print("✨ База очищена от мусора!\n")
+
+    # Синхронизируем поле price в таблице perfumes с реальным наличием в perfume_prices:
+    # если у парфюма в perfume_prices 0 предложений (все магазины «нет в наличии»), обнуляем perfumes.price = 0,
+    # чтобы на плитке каталога никогда не висела старая цена (например «от 3 042 ₽» при пустой карточке)!
+    print("🔄 Сверка цен на плитках каталога (perfumes.price) с реальным наличием в магазинах (perfume_prices)...")
+    active_min_by_pid: dict[str, int] = {}
+    step = 1000
+    p_off = 0
+    while True:
+        pres = safe_db(
+            supabase.table("perfume_prices")
+            .select("perfume_id, price, volume")
+            .neq("volume", "REVIEW")
+            .gt("price", 0)
+            .range(p_off, p_off + step - 1)
+        )
+        pbatch = (pres.data if pres and hasattr(pres, "data") else []) or []
+        for pr in pbatch:
+            pid_str = str(pr.get("perfume_id") or "")
+            price_val = int(pr.get("price") or 0)
+            if not pid_str or price_val <= 0:
+                continue
+            prev = active_min_by_pid.get(pid_str)
+            if prev is None or price_val < prev:
+                active_min_by_pid[pid_str] = price_val
+        if len(pbatch) < step:
+            break
+        p_off += step
+
+    fixed_zero_cnt = 0
+    fixed_min_cnt = 0
+    perf_off = 0
+    while True:
+        res = safe_db(
+            supabase.table("perfumes")
+            .select("id, price")
+            .order("id")
+            .range(perf_off, perf_off + step - 1)
+        )
+        batch = (res.data if res and hasattr(res, "data") else []) or []
+        for row in batch:
+            pid_str = str(row.get("id") or "")
+            cur_price = int(row.get("price") or 0)
+            real_min = active_min_by_pid.get(pid_str, 0)
+            if cur_price != real_min:
+                safe_db(supabase.table("perfumes").update({"price": real_min}).eq("id", row["id"]))
+                if real_min == 0:
+                    fixed_zero_cnt += 1
+                else:
+                    fixed_min_cnt += 1
+        if len(batch) < step:
+            break
+        perf_off += step
+
+    print(f"✨ База синхронизирована: обнулено «Нет в наличии» у {fixed_zero_cnt} духов, выровнена минимальная цена у {fixed_min_cnt} духов!\n")
 
 
 # =====================================================================
@@ -2136,9 +2193,21 @@ async def worker(worker_id: int, queue: asyncio.Queue, context, total_count: int
             if best_pyramid.get("base_notes"):
                 update_payload["base_notes"] = best_pyramid["base_notes"]
 
-        if found_offers:
+        # Всегда выставляем в perfumes.price реальную минимальную цену из оставшихся в perfume_prices предложений
+        # (даже если часть магазинов была под антиботом, а единственный магазин с товаром теперь «Нет в наличии» -> ставим 0!)
+        rem_res = safe_db(
+            supabase.table("perfume_prices")
+            .select("price")
+            .eq("perfume_id", perfume_id)
+            .neq("volume", "REVIEW")
+            .gt("price", 0)
+        )
+        rem_prices = [int(r["price"]) for r in ((rem_res.data if rem_res and hasattr(rem_res, "data") else []) or []) if int(r.get("price") or 0) > 0]
+        if rem_prices:
+            update_payload["price"] = min(rem_prices)
+        elif found_offers:
             update_payload["price"] = min(o["price"] for o in found_offers)
-        elif not blocked_stores:
+        else:
             update_payload["price"] = 0
 
         if update_payload:
@@ -2306,6 +2375,9 @@ async def main():
         if args.offset == 0:
             cleanup_duplicate_perfumes_in_db()
             cleanup_corrupted_db_data()
+        else:
+            # Даём Потоку #0 фору 20 секунд, чтобы он успел удалить дубликаты ДО того, как остальные потоки загрузят список ID
+            await asyncio.sleep(20)
         print(f"📦 Загружаем список ароматов из базы (offset={args.offset}, batch={args.batch or 'все'})...")
         perfumes = fetch_all_perfumes_from_db(start_offset=args.offset, max_batch=args.batch)
         print(f"📦 Всего ароматов в базе для проверки: {len(perfumes)}\n")
