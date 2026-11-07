@@ -1,0 +1,55 @@
+name: Weekly Import New Perfumes
+
+on:
+  schedule:
+    # Запускается автоматически 1 раз в неделю — каждое воскресенье в 03:00 UTC (06:00 по Москве)
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      target_limit:
+        description: 'Максимум новых духов за один запуск'
+        required: false
+        default: '300'
+      store:
+        description: 'Магазин (all, randewoo, goldapple, rivegauche, letoile)'
+        required: false
+        default: 'all'
+      start_page:
+        description: 'С какой страницы начинать обход'
+        required: false
+        default: '1'
+      max_pages:
+        description: 'Сколько страниц каталога проверять (0 = все подряд)'
+        required: false
+        default: '40'
+
+jobs:
+  import-new-perfumes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies and Chromium
+        run: |
+          pip install supabase playwright beautifulsoup4 python-dotenv
+          playwright install --with-deps chromium
+
+      - name: Run weekly new perfume importer
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          RU_PROXY: ${{ secrets.RU_PROXY }}
+        run: |
+          TARGET=${{ github.event.inputs.target_limit || 300 }}
+          STORE=${{ github.event.inputs.store || 'all' }}
+          START_PAGE=${{ github.event.inputs.start_page || 1 }}
+          MAX_PAGES=${{ github.event.inputs.max_pages || 40 }}
+          xvfb-run --auto-servernum --server-args="-screen 0 1366x900x24" python import_new_perfumes.py --target $TARGET --store $STORE --start-page $START_PAGE --max-pages $MAX_PAGES
