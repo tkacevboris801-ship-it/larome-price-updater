@@ -853,13 +853,23 @@ def import_clean_perfumes(
     total_added = 0
 
     with sync_playwright() as p:
+        # На Linux (GitHub Actions под xvfb-run) запускаем headless=False, чтобы антибот не видел HeadlessChrome
+        use_headless = True if os.name == "nt" else False
         launch_kwargs = {
-            "headless": True,
-            "args": ["--disable-blink-features=AutomationControlled"],
+            "headless": use_headless,
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--window-size=1366,900",
+            ],
         }
         if proxy_cfg:
             launch_kwargs["proxy"] = proxy_cfg
-        browser = p.chromium.launch(**launch_kwargs)
+        try:
+            browser = p.chromium.launch(**launch_kwargs)
+        except Exception:
+            launch_kwargs["headless"] = True
+            browser = p.chromium.launch(**launch_kwargs)
+
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
             locale="ru-RU",
@@ -868,7 +878,10 @@ def import_clean_perfumes(
         context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
-        page = context.new_page()
+        # Отдельные вкладки для Randewoo и для остальных магазинов, чтобы отложенный редирект Л'Этуаль (chrome-error://chromewebdata/)
+        # никогда не прерывал загрузку следующей страницы Randewoo!
+        rw_page = context.new_page()
+        extra_page = context.new_page()
         detail_page = context.new_page()
 
         def block_trackers(route):
@@ -878,7 +891,8 @@ def import_clean_perfumes(
             else:
                 route.continue_()
 
-        page.route("**/*", block_trackers)
+        rw_page.route("**/*", block_trackers)
+        extra_page.route("**/*", block_trackers)
         detail_page.route("**/*", block_trackers)
 
         # Собираем единую очередь страниц с чередованием магазинов (по 3 страницы Randewoo -> 2 стр. Золотое Яблоко -> 2 стр. Рив Гош -> 2 стр. Л'Этуаль),
@@ -934,9 +948,17 @@ def import_clean_perfumes(
             if task["type"] == "randewoo":
                 print(f"\n📄 [Randewoo • {gender} | Стр. {page_num}] Проверяем каталог: {url}")
                 try:
-                    page.goto(url, timeout=30000, wait_until="domcontentloaded")
-                    page.wait_for_timeout(1200)
-                    soup = BeautifulSoup(page.content(), "html.parser")
+                    for _nav_try in range(2):
+                        try:
+                            rw_page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                            break
+                        except Exception as _nav_e:
+                            if _nav_try == 0 and "interrupted" in str(_nav_e).lower():
+                                rw_page.wait_for_timeout(600)
+                                continue
+                            raise
+                    rw_page.wait_for_timeout(1200)
+                    soup = BeautifulSoup(rw_page.content(), "html.parser")
                     cards = soup.select(".products__item, .b-catalogItems__item, li[data-product-id], article")
                     skipped_existing = 0
 
@@ -1037,9 +1059,9 @@ def import_clean_perfumes(
                 base_dom = task["base_domain"]
                 print(f"\n🛍️ [{st_name} | Стр. {page_num}] Ищем эксклюзивы: {url}")
                 try:
-                    page.goto(url, timeout=30000, wait_until="domcontentloaded")
-                    page.wait_for_timeout(1600)
-                    soup = BeautifulSoup(page.content(), "html.parser")
+                    extra_page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                    extra_page.wait_for_timeout(1600)
+                    soup = BeautifulSoup(extra_page.content(), "html.parser")
                     cards = soup.select("article, product-item, [data-qa='product-card'], [class*='product-card'], [class*='product-item']")
                     if not cards:
                         continue
