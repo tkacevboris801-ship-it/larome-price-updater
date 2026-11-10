@@ -653,9 +653,76 @@ def extract_reviews_from_html(html_content: str, store_label: str, max_reviews: 
     return collected
 
 
+async def extract_live_reviews_from_page(page, store_label: str, html_content: str, max_reviews: int = 8) -> list[dict]:
+    collected = extract_reviews_from_html(html_content, store_label, max_reviews=max_reviews)
+    if len(collected) >= max_reviews:
+        return collected[:max_reviews]
+
+    seen_norms = {normalize_text(r["text"])[:80] for r in collected}
+    clean_store = store_label.strip().lower()
+
+    try:
+        dom_revs = await page.evaluate(
+            r"""() => {
+                const results = [];
+                const blocks = document.querySelectorAll(
+                    '[itemprop="review"], [class*="review"], [class*="Review"], [class*="comment"], [class*="Comment"], [class*="feedback"], [data-qa*="review"]'
+                );
+                for (const b of blocks) {
+                    if (results.length >= 20) break;
+                    const txt = (b.innerText || '').replace(/\s+/g, ' ').trim();
+                    if (txt.length < 30 || txt.length > 850) continue;
+                    results.push({ author: 'Покупатель', text: txt, rating: 5 });
+                }
+                return results;
+            }"""
+        )
+        for dr in (dom_revs or []):
+            if len(collected) >= max_reviews:
+                break
+            t_clean = _clean_review_text(str(dr.get("text", "")))
+            if not _is_valid_review_text(t_clean):
+                continue
+            nk = normalize_text(t_clean)[:80]
+            if not nk or nk in seen_norms:
+                continue
+            seen_norms.add(nk)
+            collected.append({
+                "store": clean_store,
+                "author": str(dr.get("author") or "Покупатель")[:30],
+                "rating": 5,
+                "text": t_clean,
+            })
+    except Exception:
+        pass
+
+    return collected[:max_reviews]
+
+
 def save_scraped_reviews_to_db(perfume_id: str, reviews: list[dict]):
     if not reviews:
         return
+
+    # Чередуем (round-robin) отзывы по разным магазинам, чтобы не было перекоса в один магазин
+    buckets: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for r in reviews:
+        st = r.get("store", "randewoo").strip().lower()
+        if st not in buckets:
+            buckets[st] = []
+            order.append(st)
+        buckets[st].append(r)
+
+    interleaved: list[dict] = []
+    depth = 0
+    added = True
+    while added and len(interleaved) < 24:
+        added = False
+        for st in order:
+            if depth < len(buckets[st]):
+                interleaved.append(buckets[st][depth])
+                added = True
+        depth += 1
 
     safe_db(
         supabase.table("perfume_prices")
@@ -665,7 +732,7 @@ def save_scraped_reviews_to_db(perfume_id: str, reviews: list[dict]):
     )
 
     review_price_rows = []
-    for rev in reviews[:8]:
+    for rev in interleaved[:24]:
         store_tag = rev["store"]
         author = re.sub(r"[\|\[\]]+", " ", rev.get("author", "Покупатель")).strip() or "Покупатель"
         rating = max(1, min(5, int(rev.get("rating", 5))))
@@ -684,7 +751,7 @@ def save_scraped_reviews_to_db(perfume_id: str, reviews: list[dict]):
 
     try:
         supabase.table("perfume_reviews").delete().eq("perfume_id", perfume_id).ilike("comment", "[SRC:%").execute()
-        for rev in reviews[:6]:
+        for rev in interleaved[:20]:
             author = re.sub(r"[\|\[\]]+", " ", rev.get("author", "Покупатель")).strip() or "Покупатель"
             tagged_comment = f"[SRC:{rev['store']}|{author}] {rev['text'].strip()}"
             supabase.table("perfume_reviews").insert({
@@ -969,7 +1036,7 @@ async def parse_randewoo(
             return STATUS_NOT_FOUND, [], None, []
 
         pyramid = extract_pyramid_from_html(html_content)
-        reviews = extract_reviews_from_html(html_content, "randewoo", max_reviews=5)
+        reviews = await extract_live_reviews_from_page(page, "randewoo", html_content, max_reviews=8)
         offers = extract_randewoo_offers_from_html(html_content, target_url)
 
         if offers:
@@ -1562,7 +1629,7 @@ async def parse_rivegauche_or_letu_v21(
 
             html_content = await page.content()
             pyramid = extract_pyramid_from_html(html_content)
-            reviews = extract_reviews_from_html(html_content, store["name"].lower(), max_reviews=3)
+            reviews = await extract_live_reviews_from_page(page, store["name"].lower(), html_content, max_reviews=8)
 
             base_product_url = page.url.split("?")[0]
             collected_offers = await extract_volumes_and_prices_on_product_page(
@@ -1737,7 +1804,7 @@ async def parse_goldapple_v28(
 
             html_content = await page.content()
             pyramid = extract_pyramid_from_html(html_content)
-            reviews = extract_reviews_from_html(html_content, "золотое яблоко", max_reviews=3)
+            reviews = await extract_live_reviews_from_page(page, "золотое яблоко", html_content, max_reviews=8)
 
             base_product_url = page.url.split("?")[0]
             collected_offers = await extract_volumes_and_prices_on_product_page(
