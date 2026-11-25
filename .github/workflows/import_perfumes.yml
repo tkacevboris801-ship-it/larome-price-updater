@@ -3,7 +3,7 @@ name: Weekly Import New Perfumes
 on:
   schedule:
     # Запускается автоматически 1 раз в неделю — каждое воскресенье в 03:00 UTC (06:00 по Москве)
-    - cron: '0 3 * * 0'
+    - cron: '0 3 * * 2,5'
   workflow_dispatch:
     inputs:
       target_limit:
