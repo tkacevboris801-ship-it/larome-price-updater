@@ -150,25 +150,60 @@ SECTIONS = [
 # 2. Каталоги Золотого Яблока, Рив Гош и Л'Этуаль (чтобы находить эксклюзивные бренды, которых нет на Randewoo)
 EXTRA_STORE_SECTIONS = [
     {
-        "store_name": "Золотое Яблоко",
-        "base_domain": "https://goldapple.ru",
-        "url_template": "https://goldapple.ru/parfjumerija?p={page}",
+        "store_name": "Л'Этуаль",
+        "base_domain": "https://www.letu.ru",
+        "url_template": "https://www.letu.ru/browse/parfyumeriya/page-{page}",
         "gender": "Унисекс",
-        "max_pages": 150,
+        "max_pages": 220,
     },
     {
-        "store_name": "Рив Гош",
-        "base_domain": "https://rivegauche.ru",
-        "url_template": "https://rivegauche.ru/category/parfyumeriya-3?page={page}",
+        "store_name": "Л'Этуаль",
+        "base_domain": "https://www.letu.ru",
+        "url_template": "https://www.letu.ru/browse/parfyumeriya/nishevaya-parfyumeriya/page-{page}",
         "gender": "Унисекс",
         "max_pages": 120,
     },
     {
         "store_name": "Л'Этуаль",
         "base_domain": "https://www.letu.ru",
-        "url_template": "https://www.letu.ru/browse/parfyumeriya/page-{page}",
+        "url_template": "https://www.letu.ru/browse/parfyumeriya/zhenskaya-parfyumeriya/page-{page}",
+        "gender": "Женский",
+        "max_pages": 180,
+    },
+    {
+        "store_name": "Л'Этуаль",
+        "base_domain": "https://www.letu.ru",
+        "url_template": "https://www.letu.ru/browse/parfyumeriya/muzhskaya-parfyumeriya/page-{page}",
+        "gender": "Мужской",
+        "max_pages": 140,
+    },
+    {
+        "store_name": "Золотое Яблоко",
+        "base_domain": "https://goldapple.ru",
+        "url_template": "https://goldapple.ru/parfjumerija?p={page}",
+        "gender": "Унисекс",
+        "max_pages": 220,
+    },
+    {
+        "store_name": "Золотое Яблоко",
+        "base_domain": "https://goldapple.ru",
+        "url_template": "https://goldapple.ru/parfjumerija/nishevaja-parfjumerija?p={page}",
         "gender": "Унисекс",
         "max_pages": 120,
+    },
+    {
+        "store_name": "Рив Гош",
+        "base_domain": "https://rivegauche.ru",
+        "url_template": "https://rivegauche.ru/category/parfyumeriya-3?page={page}",
+        "gender": "Унисекс",
+        "max_pages": 160,
+    },
+    {
+        "store_name": "Рив Гош",
+        "base_domain": "https://rivegauche.ru",
+        "url_template": "https://rivegauche.ru/category/nishevaya-parfyumeriya-2?page={page}",
+        "gender": "Унисекс",
+        "max_pages": 90,
     },
 ]
 
@@ -683,18 +718,34 @@ def parse_extra_store_product_details(detail_page, prod_url: str, store_name: st
         if m_base:
             base_notes = clean_notes_list(m_base.group(1))
 
-        vol_m = re.search(r"\b(\d{1,3}(?:[.,]\d)?)\s*(?:мл|ml|объ[её]м\s*/\s*мл)\b", page_txt, re.IGNORECASE)
-        vol_str = None
-        if vol_m:
-            vf = float(vol_m.group(1).replace(",", "."))
-            if vf >= 10:
-                vol_str = format_vol(vf)
-        if not vol_str:
-            return None
+        # Ищем ВСЕ упоминания объёма на странице (чтобы рекламный баннер "пробник 2 мл в подарок" в шапке не сбивал парсинг флакона 50/100 мл!)
+        all_vol_matches = re.findall(
+            r"\b(\d{1,3}(?:[.,]\d)?)\s*(?:мл|ml|объ[её]м\s*/\s*мл)\b",
+            page_txt,
+            re.IGNORECASE,
+        )
+        valid_vols = []
+        for vm in all_vol_matches:
+            try:
+                vf = float(vm.replace(",", "."))
+                if vf >= 7.5:
+                    vs = format_vol(vf)
+                    if vs and vs not in valid_vols:
+                        valid_vols.append(vs)
+            except Exception:
+                pass
+        vol_str = valid_vols[0] if valid_vols else "50 мл"
 
         joined_nums = re.sub(r"\b(\d{1,3})[\s\xa0\u202f]+(\d{3})\b", r"\1\2", page_txt)
-        p_matches = re.findall(r"\b(\d{4,6})\s*(?:₽|руб)", joined_nums, re.IGNORECASE)
-        valid_p = [int(p) for p in p_matches if 1500 <= int(p) <= 180000]
+        p_matches = re.findall(r"\b(\d{4,6})\s*(?:₽|руб|р\.?)", joined_nums, re.IGNORECASE)
+        valid_p = [int(p) for p in p_matches if 1200 <= int(p) <= 220000]
+        if not valid_p:
+            for meta_p in soup.select('meta[itemprop="price"][content], [data-at-price], [class*="price"]'):
+                raw_mp = meta_p.get("content") or meta_p.get_text(" ", strip=True) or ""
+                raw_mp_clean = re.sub(r"\b(\d{1,3})[\s\xa0\u202f]+(\d{3})\b", r"\1\2", str(raw_mp))
+                for m_d in re.findall(r"\b(\d{4,6})\b", raw_mp_clean):
+                    if 1200 <= int(m_d) <= 220000:
+                        valid_p.append(int(m_d))
         if not valid_p:
             return None
 
@@ -906,7 +957,22 @@ def import_clean_perfumes(
 
         sf = (store_filter or "all").lower().strip()
 
-        for p_num in range(max(1, start_page), overall_max_page + 1):
+        # Умная ротация страниц для GitHub Actions (при запуске 2 раза в неделю):
+        # Сначала всегда проверяем стр. 1..12 (свежие новинки), а затем сдвигаем глубокое окно обхода по дню года,
+        # чтобы скрипт каждый запуск проходил новые глубокие страницы всех 4 магазинов, а не топтался только на первых 30 страницах!
+        all_pages = list(range(max(1, start_page), overall_max_page + 1))
+        if start_page == 1 and max_pages_limit == 0 and len(all_pages) > 20:
+            head_pages = all_pages[:12]
+            deep_pages = all_pages[12:]
+            day_of_year = int(time.gmtime().tm_yday)
+            shift = ((day_of_year * 37) % len(deep_pages))
+            rotated_deep = deep_pages[shift:] + deep_pages[:shift]
+            ordered_pages = head_pages + rotated_deep
+            print(f"🔄 Умная ротация обхода: сначала стр. 1..12 (новинки), затем глубокий обход со стр. {rotated_deep[0]}..")
+        else:
+            ordered_pages = all_pages
+
+        for p_num in ordered_pages:
             if sf in ("all", "randewoo", "rw"):
                 for base_url, gender, max_p in SECTIONS:
                     if p_num <= max_p:
@@ -1062,7 +1128,11 @@ def import_clean_perfumes(
                     extra_page.goto(url, timeout=30000, wait_until="domcontentloaded")
                     extra_page.wait_for_timeout(1600)
                     soup = BeautifulSoup(extra_page.content(), "html.parser")
-                    cards = soup.select("article, product-item, [data-qa='product-card'], [class*='product-card'], [class*='product-item']")
+                    cards = soup.select(
+                        "article, product-item, [data-qa='product-card'], [data-at-product-tile], "
+                        "[class*='product-card'], [class*='product-item'], [class*='product-tile'], "
+                        "li[class*='product'], div[class*='ProductCard']"
+                    )
                     if not cards:
                         continue
 
@@ -1072,9 +1142,15 @@ def import_clean_perfumes(
                         card_txt = card.get_text(" ", strip=True)
                         if any(bw in card_txt.lower() for bw in BAD_PRODUCT_WORDS):
                             continue
-                        brand_el = card.select_one("[class*='brand'], [data-qa*='brand']")
-                        title_el = card.select_one("[class*='name'], [class*='title'], [data-qa*='title']")
-                        link_el = card.select_one("a[href*='/product/'], a[href]")
+                        brand_el = card.select_one(
+                            "[class*='brand'], [data-qa*='brand'], [data-at-product-tile-brand], "
+                            "[itemprop='brand'], [class*='Brand']"
+                        )
+                        title_el = card.select_one(
+                            "[class*='name'], [class*='title'], [data-qa*='title'], "
+                            "[data-at-product-tile-title], [itemprop='name'], [class*='Name'], [class*='Title']"
+                        )
+                        link_el = card.select_one("a[href*='/product/'], a[href*='/parfjumerija/'], a[href]")
                         if not brand_el or not title_el or not link_el:
                             continue
 
@@ -1088,13 +1164,15 @@ def import_clean_perfumes(
                         raw_key = f"{brand.lower().replace('ё', 'е')}_{title.lower().replace('ё', 'е')}"
                         if norm_key in existing_set or raw_key in existing_set or len(norm_key) < 4:
                             continue
-                        b_slug, t_slug = norm_key.split("_", 1)
-                        if len(t_slug) >= 4 and any(
-                            ek.startswith(b_slug + "_") and (t_slug in ek.split("_", 1)[1] or ek.split("_", 1)[1] in t_slug)
-                            for ek in existing_set
-                            if "_" in ek
-                        ):
-                            continue
+
+                        # Если прямо на карточке каталога уже видна цена (как в Л'Этуаль и ЗЯ), запоминаем её как резерв
+                        card_joined_nums = re.sub(r"\b(\d{1,3})[\s\xa0\u202f]+(\d{3})\b", r"\1\2", card_txt)
+                        card_p_matches = [
+                            int(p)
+                            for p in re.findall(r"\b(\d{4,6})\s*(?:₽|руб|р\.?)", card_joined_nums, re.IGNORECASE)
+                            if 1200 <= int(p) <= 220000
+                        ]
+                        card_fallback_price = min(card_p_matches) if card_p_matches else 0
 
                         href = link_el.get("href", "")
                         if not href or href.startswith("#") or href.startswith("javascript"):
@@ -1112,7 +1190,15 @@ def import_clean_perfumes(
                                 image_url = urljoin(base_dom, image_url)
 
                         details = parse_extra_store_product_details(detail_page, prod_url, st_name)
-                        if not details or not details["offers"]:
+                        if (not details or not details.get("offers")) and card_fallback_price > 0:
+                            details = {
+                                "top_notes": details.get("top_notes", []) if details else [],
+                                "heart_notes": details.get("heart_notes", []) if details else [],
+                                "base_notes": details.get("base_notes", []) if details else [],
+                                "offers": [{"volume": "50 мл", "price": card_fallback_price}],
+                                "reviews": details.get("reviews", []) if details else [],
+                            }
+                        if not details or not details.get("offers"):
                             continue
 
                         real_offers = details["offers"]
