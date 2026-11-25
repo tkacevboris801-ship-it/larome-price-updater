@@ -952,25 +952,31 @@ def import_clean_perfumes(
         max_rw_pages = max(m for _, _, m in SECTIONS)
         max_extra_pages = max(s["max_pages"] for s in EXTRA_STORE_SECTIONS)
         overall_max_page = max(max_rw_pages, max_extra_pages)
-        if max_pages_limit and max_pages_limit > 0:
-            overall_max_page = min(overall_max_page, start_page + max_pages_limit - 1)
-
         sf = (store_filter or "all").lower().strip()
 
-        # Умная ротация страниц для GitHub Actions (при запуске 2 раза в неделю):
-        # Сначала всегда проверяем стр. 1..12 (свежие новинки), а затем сдвигаем глубокое окно обхода по дню года,
-        # чтобы скрипт каждый запуск проходил новые глубокие страницы всех 4 магазинов, а не топтался только на первых 30 страницах!
-        all_pages = list(range(max(1, start_page), overall_max_page + 1))
-        if start_page == 1 and max_pages_limit == 0 and len(all_pages) > 20:
-            head_pages = all_pages[:12]
-            deep_pages = all_pages[12:]
-            day_of_year = int(time.gmtime().tm_yday)
-            shift = ((day_of_year * 37) % len(deep_pages))
+        # Умная ротация страниц для GitHub Actions (работает и при max_pages=0, и при дефолтном max_pages=40 из расписания!):
+        # Если start_page == 1, сначала берём первые 8 страниц (свежие новинки), а остальные страницы берём со сдвигом вглубь каталога (стр. 9..450),
+        # чтобы даже при дефолтном лимите 40 страниц в GitHub Actions скрипт каждый раз проверял НОВЫЕ глубокие страницы, а не топтался на стр. 1..40!
+        full_catalog_pages = list(range(max(1, start_page), overall_max_page + 1))
+        if start_page == 1 and len(full_catalog_pages) > 20:
+            head_pages = full_catalog_pages[:8]
+            deep_pages = full_catalog_pages[8:]
+            day_slot = int(time.time() // 14400)  # меняется каждые 4 часа и при каждом новом дне запуска
+            shift = (day_slot * 35) % len(deep_pages)
             rotated_deep = deep_pages[shift:] + deep_pages[:shift]
             ordered_pages = head_pages + rotated_deep
-            print(f"🔄 Умная ротация обхода: сначала стр. 1..12 (новинки), затем глубокий обход со стр. {rotated_deep[0]}..")
+            if max_pages_limit and max_pages_limit > 0:
+                # При запуске по расписанию (где по умолчанию стоит 40) увеличиваем окно минимум до 90 страниц
+                effective_max_p = max(max_pages_limit, 90)
+                ordered_pages = ordered_pages[:effective_max_p]
+            print(
+                f"🔄 Умная ротация обхода: стр. 1..8 (новинки) + глубокий срез со стр. {rotated_deep[0]} (всего до {len(ordered_pages)} стр. в каждом разделе)..."
+            )
         else:
-            ordered_pages = all_pages
+            if max_pages_limit and max_pages_limit > 0:
+                ordered_pages = full_catalog_pages[:max_pages_limit]
+            else:
+                ordered_pages = full_catalog_pages
 
         for p_num in ordered_pages:
             if sf in ("all", "randewoo", "rw"):
